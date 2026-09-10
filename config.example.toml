@@ -60,6 +60,13 @@ twelvelabs_rerank_terms = false
 # twelvelabs_marengo_model = "marengo3.0"
 # twelvelabs_pegasus_model = "pegasus1.5"
 
+# Split-screen filler pool. When set, every generated video shows one clip from
+# this directory in the bottom half of the frame, picked at random per task.
+# Point it at a directory of "satisfying" or gameplay loops to raise retention.
+# Leave empty to disable, override per run with --split-screen-video, or skip a
+# single run with --no-split-screen. Relative paths resolve from the project root.
+split_screen_filler_dir = ""
+
 # Match search terms and downloaded materials to the script narrative order.
 # 默认关闭，开启后会减少随机性，使素材顺序更贴近文案结构。
 match_materials_to_script = false

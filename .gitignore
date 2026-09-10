@@ -42,3 +42,17 @@ htmlcov/
 .codegraph
 /docs/superpowers
 .understand-anything
+
+# Credenciales OAuth de YouTube: nunca deben commitearse
+secrets/
+storage/batch-state.json
+
+# Material de video del split-screen. Son archivos de varios GB: todos superan
+# el límite de 100 MB por archivo de GitHub y el push se rechazaría. Se ignoran
+# para que un `git add -A` no los meta en el historial local (inflaría .git con
+# el mismo tamaño). crop.json y los README sí se versionan.
+/videos/**/*.mp4
+/videos/**/*.mov
+/videos/**/*.mkv
+/videos/**/*.webm
+/resource/fillers/*.mp4

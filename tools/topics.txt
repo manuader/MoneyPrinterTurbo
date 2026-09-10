@@ -1,0 +1,46 @@
+# Temas para la tanda diaria. Formato:  tema | términos de búsqueda
+#
+# Los términos van a mano porque son el eslabón más frágil del pipeline: los
+# automáticos devuelven material genérico que no acompaña al guion. Dos reglas
+# que salieron de probar, ambas documentadas en
+# docs/prompts/retention-script-system-prompt.md:
+#
+#   1. Acciones filmables, no conceptos. "hands typing on laptop" devuelve
+#      material; "cybersecurity threat" devuelve ilustraciones.
+#   2. El registro visual va dentro del término. "office" trae oficinas
+#      luminosas de stock; "dimly lit office at night" trae lo que el guion
+#      necesita.
+#
+# Y la regla que más importa al elegir tema: los bancos de stock tienen que
+# poder ilustrarlo. Adolescentes con teléfonos, colegios, oficinas y ciudades
+# abundan. "Mujer transfiriendo dinero a un estafador" no existe.
+
+a student who spent a year living as a completely different person online, until a classmate recognised them | teenage girl face lit by phone dark room, empty school corridor night, hands on laptop bedroom dim, phone screen glow close up, school lockers empty hallway, girl alone bus window evening
+
+a deepfake job candidate who was hired and worked remotely for months before anyone noticed | empty desk dark office, video call laptop screen dim, hands on keyboard night, office corridor empty fluorescent, man alone desk lamp, security badge close up
+
+an AI chatbot romance that drained a retired teacher's pension over eight months | older woman alone kitchen night, hands typing phone dark, empty armchair living room, bank card close up lamp, rain window evening, old photographs table
+
+a smart speaker recording that exposed what was happening in a house at night | dark hallway house night, smart speaker close up, empty bedroom moonlight, hands holding phone dark, front door night, kitchen counter dim light
+
+an AI clone of a chief executive approving fake invoices for a year | empty boardroom dark, hands signing documents desk, invoice papers close up, office building night exterior, man on phone dim office, computer screen glow night
+
+a delivery driver who noticed the same package returning to the same address every week | delivery van night street, hands scanning package, apartment doorway dim, cardboard boxes warehouse, driver alone van window, street lamp rain night
+
+a teenager who discovered their face was being used in adverts they never filmed | phone screen close up dark, girl looking at laptop night, billboard city night, hands scrolling phone bed, empty bus stop evening, city street neon night
+
+a bank employee who approved a transfer that no human had ever requested | bank office empty night, hands on old keyboard dim, computer monitor glow dark, office chair empty, coffee cup desk night, security camera corridor
+
+a security camera that kept recording after the family cancelled the service | security camera close up, empty living room night, dark garden house exterior, hands holding tablet dim, front porch night, monitor screen glow dark
+
+a translation app that quietly changed what one side of a conversation was saying | phone screen close up hands, two people talking cafe dim, airport terminal night, hands typing message dark, street market evening, laptop screen glow night
+
+a smart lock that let someone in three nights in a row before anyone checked | front door lock close up, dark hallway night house, phone notification screen dim, empty staircase building, street at night rain, hands on door handle
+
+a gaming account worth thousands that vanished during a routine support call | gaming setup dark room, hands on controller dim, computer screen glow night, headset on desk, empty gaming chair, keyboard lit night
+
+a driver whose car insurance was cancelled by a claim they never filed | car interior night rain, hands on steering wheel dim, parked car street night, documents on table lamp, headlights wet road, empty parking garage
+
+a fitness app that sold the map of everywhere its users ran | runner alone road dawn, phone strapped arm close up, empty park path morning, hands checking watch, city street early light, running shoes pavement
+
+a job interview where every other candidate turned out to be the same person | office waiting room empty, hands adjusting tie mirror, video call screen dim, corridor office fluorescent, empty meeting room chairs, laptop camera close up

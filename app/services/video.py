@@ -1,5 +1,6 @@
 import itertools
 import io
+import json
 import os
 import random
 import gc
@@ -80,6 +81,11 @@ _MIN_MATERIAL_DIMENSION = 480
 # 既能放行仅仅因为取整而略低于阈值的素材，也仍然能挡住真正的低清素材。
 _MIN_DIMENSION_TOLERANCE = 10
 _DEFAULT_VIDEO_CODEC = "libx264"
+# 串联阶段的中间片段码率。中间产物还会被最终合成重新编码，取值只需保证
+# 这一步不引入可见劣化，不必按成片标准调高。
+_CONCAT_HARDWARE_BITRATE = "12M"
+# 陪看素材首尾各跳过的秒数：长视频开头多是片头标题，结尾多是订阅引导和黑场。
+_FILLER_EDGE_MARGIN_SECONDS = 30.0
 _SUPPORTED_VIDEO_CODECS = (
     "libx264",
     "h264_nvenc",
@@ -289,6 +295,23 @@ def _fallback_write_videofile(clip, output_file: str, failed_codec: str, reason:
     return _DEFAULT_VIDEO_CODEC
 
 
+def _default_bitrate_for_codec(codec: str, clip) -> str | None:
+    """
+    为需要显式码率的硬件编码器补一个默认值。
+
+    VideoToolbox 不支持 libx264 的 CRF 恒定质量模式：调用方不传 bitrate 时，
+    FFmpeg 会直接报 ``Error setting bitrate property`` 并拒绝打开编码器，
+    整条硬件编码路径都会白白失败一次再回退。这里按分辨率给出一个够用的
+    码率，让硬件编码真正可用。
+    """
+    if "videotoolbox" not in codec:
+        return None
+    width, height = clip.size
+    # 1080x1920 竖屏约 8Mbps 已经足够短视频平台二次压缩；其余分辨率等比缩放。
+    megabits = max(2, round(width * height * 8 / (1080 * 1920)))
+    return f"{megabits}M"
+
+
 def _write_videofile_with_codec_fallback(clip, output_file: str, codec: str, **kwargs):
     """
     使用指定编码器写出视频，失败时自动用 libx264 重试一次。
@@ -298,7 +321,12 @@ def _write_videofile_with_codec_fallback(clip, output_file: str, codec: str, **k
     """
     effective_codec = _get_effective_video_codec(codec)
     try:
-        clip.write_videofile(output_file, codec=effective_codec, **kwargs)
+        write_kwargs = dict(kwargs)
+        if not write_kwargs.get("bitrate"):
+            default_bitrate = _default_bitrate_for_codec(effective_codec, clip)
+            if default_bitrate:
+                write_kwargs["bitrate"] = default_bitrate
+        clip.write_videofile(output_file, codec=effective_codec, **write_kwargs)
         return effective_codec
     except Exception as exc:
         if effective_codec == _DEFAULT_VIDEO_CODEC:
@@ -358,6 +386,11 @@ def concat_video_clips_with_ffmpeg(
             "-pix_fmt",
             "yuv420p",
         ]
+        # VideoToolbox 没有 CRF 恒定质量模式，缺少 -b:v 时会直接拒绝打开编码器
+        # 并让整段串联失败。写文件那条路径由 _default_bitrate_for_codec 兜底，
+        # 这里是直接调用 FFmpeg 的独立路径，必须单独补上。
+        if "videotoolbox" in codec:
+            command.extend(["-b:v", _CONCAT_HARDWARE_BITRATE])
         if max_duration is not None and max_duration > 0:
             command.extend(["-t", f"{max_duration:.3f}"])
         command.append(output_file)
@@ -968,6 +1001,289 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+def split_screen_panel_heights(video_height: int, ratio: float) -> tuple[int, int]:
+    """
+    计算分屏上下两块的像素高度。
+
+    H.264 要求宽高为偶数，切割后的两块都必须满足，否则编码器会直接报错。
+    字幕定位也要用到上半屏高度，所以这里独立成函数供两边共用。
+    """
+    top_height = int(round(video_height * ratio))
+    top_height -= top_height % 2
+    top_height = max(2, min(video_height - 2, top_height))
+    return top_height, video_height - top_height
+
+
+def load_filler_crop(filler_path: str) -> dict[str, int]:
+    """
+    读取陪看素材的额外裁边配置，返回 top/bottom/left/right 四个像素值。
+
+    很多长视频源自带作者水印、竖屏内容两侧的模糊填充条，或者顶部的频道条。
+    这些东西按“覆盖裁剪”规则正好落在画面中央附近，不会被自动裁掉，只能按
+    文件单独指定。配置放在素材目录下的 ``crop.json``：
+
+        {
+          "default":            {"bottom": 0},
+          "Some Long Video.mp4": {"left": 420, "right": 420, "bottom": 60}
+        }
+
+    缺失的键按 0 处理；文件不存在、解析失败或数值非法都退回不裁边，因为裁边
+    只是画面优化，不值得让整条视频生成失败。
+    """
+    empty = {"top": 0, "bottom": 0, "left": 0, "right": 0}
+    # 素材按 audio/ 与 no-audio/ 分子目录存放后，配置放在池子根目录最省事，
+    # 所以从素材所在目录向上找两级，用最先命中的那份。
+    directory = os.path.dirname(os.path.abspath(filler_path))
+    config_path = ""
+    for _ in range(3):
+        candidate = os.path.join(directory, "crop.json")
+        if os.path.isfile(candidate):
+            config_path = candidate
+            break
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    if not config_path:
+        return empty
+
+    try:
+        with open(config_path, encoding="utf-8") as fp:
+            data = json.load(fp)
+        entry = data.get(os.path.basename(filler_path)) or data.get("default") or {}
+        crop = {key: max(0, int(entry.get(key, 0))) for key in empty}
+    except Exception:
+        logger.exception(f"failed to read filler crop config: {config_path}")
+        return empty
+
+    if any(crop.values()):
+        logger.info(f"applying filler crop {crop} from {config_path}")
+    return crop
+
+
+def probe_video_has_audio(video_path: str) -> bool:
+    """
+    判断素材是否带音轨。
+
+    没有音轨时把 ``[1:a]`` 写进 filter_complex 会让 FFmpeg 直接报错退出，
+    所以必须先确认再决定是否混音。
+    """
+    result = subprocess.run(
+        [
+            utils.get_ffmpeg_binary(),
+            "-hide_banner",
+            "-i",
+            video_path,
+            "-f",
+            "null",
+            "-t",
+            "0.1",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return "Audio:" in (result.stderr or "")
+
+
+def probe_video_duration(video_path: str) -> float:
+    """
+    读取视频时长，失败时返回 0 而不是抛错。
+
+    调用方只用它来决定随机区间，拿不到时长时退回“从头开始 + 循环”即可，
+    不值得让整个分屏流程失败。
+    """
+    try:
+        with _open_video_clip_quietly(video_path) as clip:
+            return float(clip.duration or 0.0)
+    except Exception:
+        logger.exception(f"failed to probe filler duration: {video_path}")
+        return 0.0
+
+
+def pick_filler_segment_start(
+    filler_duration: float,
+    needed_duration: float,
+    edge_margin: float = _FILLER_EDGE_MARGIN_SECONDS,
+) -> float:
+    """
+    在陪看素材里随机挑一个起点，返回秒数。
+
+    素材是几个小时的长视频，每次都从头播放会让所有成片共用同一段画面，观众
+    很快就能认出模板。随机起点让同一个源文件产出几乎不重复的背景。
+
+    掐头去尾各留 ``edge_margin`` 秒：长视频的开头通常是片头或标题卡，结尾常
+    是订阅引导和黑场，两端都不适合当背景。素材不够长时优先保证时长填满，
+    再退回不留边距，最后才回到 0 让上游循环兜底。
+    """
+    if filler_duration <= 0 or needed_duration <= 0:
+        return 0.0
+
+    latest_start = filler_duration - edge_margin - needed_duration
+    if latest_start > edge_margin:
+        return random.uniform(edge_margin, latest_start)
+
+    # 留不出边距时放弃边距，但仍然随机化起点，避免退化成固定的开头。
+    latest_start_without_margin = filler_duration - needed_duration
+    if latest_start_without_margin > 0:
+        logger.warning(
+            f"filler is too short for a {edge_margin:.0f}s edge margin "
+            f"(duration {filler_duration:.1f}s, needed {needed_duration:.1f}s); "
+            f"picking a start without margins"
+        )
+        return random.uniform(0.0, latest_start_without_margin)
+
+    logger.warning(
+        f"filler is shorter than the video ({filler_duration:.1f}s < "
+        f"{needed_duration:.1f}s); starting at 0 and looping"
+    )
+    return 0.0
+
+
+def build_split_screen_video(
+    main_video_path: str,
+    filler_path: str,
+    output_file: str,
+    video_width: int,
+    video_height: int,
+    ratio: float,
+    duration: float,
+    threads: int,
+    filler_volume: float = 0.0,
+) -> str:
+    """
+    用一次 FFmpeg 调用生成上下分屏画面，返回输出文件路径。
+
+    上半部分是正片，下半部分是“陪看”素材（游戏录屏、解压视频等），用于短视频
+    平台的完播率优化。``filler_volume`` 大于 0 时保留素材音轨并按该系数压低，
+    ASMR 类素材的声音本身就是留人的一部分；为 0 时完全静音。
+
+    这里刻意不走 MoviePy 的 CompositeVideoClip：那条路要在 Python 里逐帧
+    合成上下两块，一个 46 秒的竖屏成片就要多花十分钟。``scale`` + ``crop`` +
+    ``vstack`` 全部在 FFmpeg 的 C 滤镜链里完成，只解码编码一次。
+    """
+    top_height, bottom_height = split_screen_panel_heights(video_height, ratio)
+
+    filler_start = pick_filler_segment_start(
+        filler_duration=probe_video_duration(filler_path),
+        needed_duration=duration,
+    )
+    logger.info(
+        f"building split screen with ffmpeg: top {video_width}x{top_height}, "
+        f"bottom {video_width}x{bottom_height}, filler: {filler_path} "
+        f"@ {filler_start:.1f}s"
+    )
+
+    # force_original_aspect_ratio=increase 先放大到完全覆盖目标框，再居中裁掉
+    # 溢出部分，等价于 CSS 的 object-fit: cover：既不留黑边也不拉伸变形。
+    # crop 的 x/y 显式写成居中表达式：横屏素材放进竖屏格子时被裁掉的正是左右
+    # 两侧，主体几乎总在画面中央，取中间一定优于默认取某一边。
+    # 两路都先归一化到项目统一帧率再入栈。vstack 用 framesync 按时间戳配对：
+    # 正片 30fps 配上 60fps 的陪看素材时，它会为两边所有不同的时间戳各出一帧，
+    # 生成约 90fps、时基被写成 1000000/1 的畸形文件，MoviePy 随后按错误的帧率
+    # 取帧，成片上半屏就会卡在同一个镜头上。
+    def cover_chain(label: str, target_height: int, inset: str = "") -> str:
+        return (
+            f"[{label}]fps={fps},{inset}scale={video_width}:{target_height}"
+            f":force_original_aspect_ratio=increase,"
+            f"crop={video_width}:{target_height}:(in_w-{video_width})/2"
+            f":(in_h-{target_height})/2,setsar=1"
+        )
+
+    # 逐文件裁边必须发生在覆盖缩放之前：水印和填充条属于源画面的一部分，
+    # 先切掉再放大，剩下的内容才会真正铺满下半屏。
+    crop = load_filler_crop(filler_path)
+    filler_inset = ""
+    if any(crop.values()):
+        filler_inset = (
+            f"crop=in_w-{crop['left'] + crop['right']}"
+            f":in_h-{crop['top'] + crop['bottom']}"
+            f":{crop['left']}:{crop['top']},"
+        )
+
+    filter_complex = (
+        f"{cover_chain('0:v', top_height)}[top];"
+        f"{cover_chain('1:v', bottom_height, filler_inset)}[bottom];"
+        f"[top][bottom]vstack=inputs=2[v]"
+    )
+
+    # 陪看素材常常是 ASMR，音轨本身就是留住观众的一部分，不能一律丢弃。
+    # 这里把它压低后单独写进分屏文件，再由 generate_video 与旁白、BGM 混合。
+    keep_filler_audio = filler_volume > 0 and probe_video_has_audio(filler_path)
+    if keep_filler_audio:
+        filter_complex += f";[1:a]volume={filler_volume:.3f}[fillera]"
+        logger.info(f"keeping filler audio at {filler_volume:.0%} volume")
+
+    def build_command(codec: str) -> list[str]:
+        command = [
+            utils.get_ffmpeg_binary(),
+            "-y",
+            "-i",
+            main_video_path,
+            # 素材比成片短时循环兜底；配合下面的 -ss，循环回放的是随机起点之后
+            # 的片段，不会突然跳回被刻意跳过的片头。
+            "-stream_loop",
+            "-1",
+            # -ss 放在 -i 之前是输入定位：FFmpeg 直接跳到目标关键帧，几个小时
+            # 的素材也是瞬间完成，不必解码前面的内容。
+            "-ss",
+            f"{filler_start:.3f}",
+            "-i",
+            filler_path,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+        ]
+        if keep_filler_audio:
+            # 正片此时还没有音轨（旁白在后续步骤混入），所以分屏文件里的音频
+            # 就是压低后的陪看素材，generate_video 会把它当成一路素材再混合。
+            command.extend(["-map", "[fillera]", "-c:a", "aac"])
+        command += [
+            "-c:v",
+            codec,
+            "-threads",
+            str(threads or 2),
+            "-pix_fmt",
+            "yuv420p",
+            # 显式钉住输出帧率，避免 framesync 把时基写成畸形值。
+            "-r",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+        ]
+        if "videotoolbox" in codec:
+            command.extend(["-b:v", _CONCAT_HARDWARE_BITRATE])
+        command.append(output_file)
+        return command
+
+    def run_split(codec: str):
+        result = subprocess.run(
+            build_command(codec),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                (result.stderr or result.stdout or "").strip()
+                or f"ffmpeg split screen failed with code {result.returncode}"
+            )
+
+    effective_codec = _get_effective_video_codec(_get_configured_video_codec())
+    try:
+        run_split(effective_codec)
+    except Exception as exc:
+        if effective_codec == _DEFAULT_VIDEO_CODEC:
+            raise
+        # 与写文件路径保持一致：硬件编码器失败只降级本次任务的编码器，
+        # 不让分屏这一步把整个视频生成拖垮。
+        run_split(_DEFAULT_VIDEO_CODEC)
+        _disable_runtime_video_codec(effective_codec, str(exc))
+    return output_file
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -996,6 +1312,48 @@ def generate_video(
     # PermissionError: [WinError 32] The process cannot access the file because it is being used by another process: 'final-1.mp4.tempTEMP_MPY_wvf_snd.mp3'
     # write into the same directory as the output file
     output_dir = os.path.dirname(output_file)
+
+    # 分屏必须在字幕之前完成，否则字幕会跟着正片一起被缩放裁剪。这一步只换掉
+    # 输入文件，后续字幕、BGM 和写盘流程完全不用感知分屏的存在。
+    # subtitle_area_height 表示“正片实际占据的高度”：开启分屏后字幕要相对
+    # 上半屏居中，而不是相对整个画面居中，否则会压在两块画面的接缝上。
+    subtitle_area_height = video_height
+    split_screen_applied = False
+    split_screen_filler = getattr(params, "split_screen_video", "") or ""
+    if split_screen_filler:
+        if os.path.isfile(split_screen_filler):
+            split_output = os.path.join(
+                output_dir, f"split-{os.path.basename(output_file)}"
+            )
+            try:
+                with _open_video_clip_quietly(video_path) as probe_clip:
+                    main_duration = probe_clip.duration
+                video_path = build_split_screen_video(
+                    main_video_path=video_path,
+                    filler_path=split_screen_filler,
+                    output_file=split_output,
+                    video_width=video_width,
+                    video_height=video_height,
+                    ratio=params.split_screen_ratio,
+                    duration=main_duration,
+                    threads=params.n_threads or 2,
+                    filler_volume=params.split_screen_volume,
+                )
+                # 分屏文件此时可能带着压低后的素材音轨，后面要把它读出来混音。
+                split_screen_applied = True
+                subtitle_area_height, _ = split_screen_panel_heights(
+                    video_height, params.split_screen_ratio
+                )
+            except Exception:
+                # 分屏是增强效果，失败时降级为普通全屏成片而不是让整个任务挂掉。
+                logger.exception(
+                    f"failed to build split screen, falling back to full frame: "
+                    f"{split_screen_filler}"
+                )
+        else:
+            logger.warning(
+                f"split screen filler not found, skipping: {split_screen_filler}"
+            )
 
     font_path = ""
     if params.subtitle_enabled:
@@ -1147,36 +1505,53 @@ def generate_video(
         _clip = _clip.with_start(subtitle_item[0][0])
         _clip = _clip.with_end(subtitle_item[0][1])
         _clip = _clip.with_duration(duration)
+        # 所有定位都相对 subtitle_area_height 计算。没有分屏时它就等于画面高度，
+        # 行为与历史版本一致；开启分屏后它是上半屏高度，字幕因此始终待在正片里，
+        # 不会压到接缝或滑进下方的陪看素材。
         if params.subtitle_position == "bottom":
-            _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
+            _clip = _clip.with_position(
+                ("center", subtitle_area_height * 0.95 - _clip.h)
+            )
         elif params.subtitle_position == "top":
-            _clip = _clip.with_position(("center", video_height * 0.05))
+            _clip = _clip.with_position(("center", subtitle_area_height * 0.05))
         elif params.subtitle_position == "custom":
             # Ensure the subtitle is fully within the screen bounds
             margin = 10  # Additional margin, in pixels
-            max_y = video_height - _clip.h - margin
+            max_y = subtitle_area_height - _clip.h - margin
             min_y = margin
-            custom_y = (video_height - _clip.h) * (params.custom_position / 100)
+            custom_y = (subtitle_area_height - _clip.h) * (
+                params.custom_position / 100
+            )
             custom_y = max(
                 min_y, min(custom_y, max_y)
             )  # Constrain the y value within the valid range
             _clip = _clip.with_position(("center", custom_y))
         else:  # center
-            _clip = _clip.with_position(("center", "center"))
+            _clip = _clip.with_position(
+                ("center", (subtitle_area_height - _clip.h) / 2)
+            )
         return _clip
 
     # MoviePy 的 CompositeAudioClip.close() 不会关闭子 AudioFileClip。这里用
     # ExitStack 显式持有所有原始文件 reader，确保成功、字幕异常、混音失败和
     # 视频写入失败等路径都能释放 FFmpeg 子进程，尤其避免 Windows 文件被占用。
     with ExitStack() as clip_stack:
+        # 分屏成功时输入文件可能带着压低后的陪看音轨，必须连音频一起打开，
+        # 否则那条 ASMR 轨会在这里被静默丢掉。
         source_video_clip = clip_stack.enter_context(
-            _open_video_clip_quietly(video_path)
+            _open_video_clip_quietly(video_path, audio=split_screen_applied)
         )
         voice_source_clip = clip_stack.enter_context(AudioFileClip(audio_path))
         video_clip = source_video_clip
         audio_clip = voice_source_clip.with_effects(
             [afx.MultiplyVolume(params.voice_volume)]
         )
+
+        # 音量已经在 FFmpeg 那步压过，这里只做叠加，不再二次衰减。
+        filler_audio_clip = source_video_clip.audio if split_screen_applied else None
+        if filler_audio_clip is not None:
+            audio_clip = CompositeAudioClip([audio_clip, filler_audio_clip])
+            logger.info("mixed split screen filler audio into the narration")
 
         def make_textclip(text):
             return TextClip(

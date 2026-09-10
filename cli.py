@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import random
 import re
 import shutil
 from typing import TYPE_CHECKING, Sequence
@@ -65,6 +66,15 @@ def _positive_float(value: str) -> float:
     parsed = float(value)
     if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError(f"value must be a finite number > 0, got {value!r}")
+    return parsed
+
+
+def _split_screen_ratio(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.1 < parsed < 0.95:
+        raise argparse.ArgumentTypeError(
+            f"value must be a finite number between 0.1 and 0.95, got {value!r}"
+        )
     return parsed
 
 
@@ -274,6 +284,40 @@ Output and exit status:
             "preserve script keyword order while selecting and concatenating materials "
             "(default: disabled)"
         ),
+    )
+    video_group.add_argument(
+        "--split-screen-video",
+        default="",
+        metavar="PATH",
+        help=(
+            "file or directory holding filler videos shown in the bottom half of the "
+            "frame (gameplay, satisfying loops); a directory picks one at random and "
+            "the filler audio is always discarded. Defaults to the "
+            "split_screen_filler_dir config value; disabled when both are empty"
+        ),
+    )
+    video_group.add_argument(
+        "--split-screen-ratio",
+        type=_split_screen_ratio,
+        default=None,
+        help=(
+            "fraction of the frame height used by the main video when a filler is "
+            "active, between 0.1 and 0.95 (default: 0.5, an even split)"
+        ),
+    )
+    video_group.add_argument(
+        "--split-screen-volume",
+        type=_non_negative_float,
+        default=None,
+        help=(
+            "volume multiplier for the filler's own audio, 0 to 1 (default: 0.4). "
+            "Many fillers are ASMR and their sound holds attention; 0 mutes them"
+        ),
+    )
+    video_group.add_argument(
+        "--no-split-screen",
+        action="store_true",
+        help="disable split screen even when split_screen_filler_dir is configured",
     )
     video_group.add_argument(
         "--n-threads",
@@ -526,6 +570,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_materials": video_materials,
         "video_count": args.video_count,
         "video_aspect": args.video_aspect,
+        "split_screen_video": _default_split_screen_source(args),
         "voice_name": args.voice_name,
         "subtitle_enabled": args.subtitle_enabled,
     }
@@ -539,6 +584,8 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_transition_mode",
         "video_clip_duration",
         "match_materials_to_script",
+        "split_screen_ratio",
+        "split_screen_volume",
         "n_threads",
         "voice_volume",
         "voice_rate",
@@ -604,6 +651,149 @@ def _resolve_cli_file(
     return resolved_path
 
 
+# 素材池按子目录声明声音处理方式。ASMR 类素材（切肥皂、解压视频）靠原声留人，
+# 配乐会和它打架；游戏录屏这类素材原声是引擎音效和 UI 提示音，留着只会吵。
+_FILLER_KEEP_AUDIO_DIRS = {"audio", "asmr"}
+_FILLER_MUTE_AUDIO_DIRS = {"no-audio", "no_audio", "noaudio", "muted"}
+
+# Volumen del material de audio/ dentro del video final. La narración va a 1.0,
+# así que este valor decide cuánto compite el ASMR con la voz.
+_FILLER_KEEP_AUDIO_VOLUME = 0.7
+
+
+def _apply_filler_audio_convention(
+    params: VideoParams, args: argparse.Namespace
+) -> None:
+    """
+    根据陪看素材所在的子目录决定素材音量和背景音乐。
+
+    ``<pool>/audio/`` 里的素材保留原声并关闭配乐；``<pool>/no-audio/`` 里的
+    素材完全静音并启用配乐。放在池子根目录的素材不受影响，沿用默认值。
+
+    显式传入 ``--split-screen-volume`` 或 ``--bgm-type`` 时不覆盖：约定是默认
+    行为，命令行才是最终决定权。
+    """
+    if not params.split_screen_video:
+        return
+
+    parts = {part.lower() for part in params.split_screen_video.split(os.sep)}
+    keeps_audio = bool(parts & _FILLER_KEEP_AUDIO_DIRS)
+    mutes_audio = bool(parts & _FILLER_MUTE_AUDIO_DIRS)
+    if keeps_audio == mutes_audio:
+        # 两边都不匹配（放在根目录），或者两边都匹配（路径同时含 audio 和
+        # no-audio，无法判断意图）。两种情况都交回默认值处理。
+        if keeps_audio:
+            logger.warning(
+                f"filler path matches both audio and no-audio conventions, "
+                f"leaving defaults: {params.split_screen_video}"
+            )
+        return
+
+    if keeps_audio:
+        if args.split_screen_volume is None:
+            params.split_screen_volume = _FILLER_KEEP_AUDIO_VOLUME
+        if args.bgm_type is None:
+            params.bgm_type = "none"
+        logger.info(
+            f"filler from audio/: keeping its sound at "
+            f"{_FILLER_KEEP_AUDIO_VOLUME:.0%}, background music off"
+        )
+    else:
+        if args.split_screen_volume is None:
+            params.split_screen_volume = 0.0
+        if args.bgm_type is None:
+            params.bgm_type = "random"
+        logger.info("filler from no-audio/: muting it, background music on")
+
+
+def _default_split_screen_source(args: argparse.Namespace) -> str:
+    """
+    决定本次任务的分屏素材来源，优先级：显式关闭 > 命令行参数 > 配置默认值。
+
+    配置项 ``split_screen_filler_dir`` 让分屏成为常态而不是每次都要手动加参数，
+    这正是批量产出短视频时想要的行为；``--no-split-screen`` 保留单次退出的能力。
+    """
+    from app.config import config
+    from app.utils import utils
+
+    if getattr(args, "no_split_screen", False):
+        return ""
+    if args.split_screen_video:
+        return args.split_screen_video
+
+    configured = str(config.app.get("split_screen_filler_dir", "") or "").strip()
+    if not configured:
+        return ""
+    # 命令行参数按当前工作目录解析，但配置项属于项目本身，必须相对项目根目录，
+    # 否则从别处调用 cli.py 时同一份配置就会失效。
+    expanded = os.path.expanduser(configured)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.join(utils.root_dir(), expanded)
+
+
+def _resolve_split_screen_filler(
+    raw_path: str,
+    *,
+    allowed_extensions: set[str],
+) -> str:
+    """
+    解析分屏陪看素材，支持单个文件和素材目录两种写法。
+
+    传目录时每次随机抽一条：同一个素材连续出现在多个视频里会让观众一眼认出
+    模板，反而拉低完播率，随机化是这个版式的默认预期而不是可选项。
+    """
+    from app.utils import utils
+
+    expanded_path = os.path.expanduser(raw_path.strip())
+    if not expanded_path:
+        raise ValueError("split screen filler path cannot be empty")
+
+    candidate = (
+        expanded_path
+        if os.path.isabs(expanded_path)
+        else os.path.join(os.getcwd(), expanded_path)
+    )
+    resolved_path = os.path.realpath(candidate)
+
+    if os.path.isdir(resolved_path):
+        # 递归收集：素材按 audio/ 与 no-audio/ 分子目录存放，声音处理规则由
+        # 所在目录决定（见 _apply_filler_audio_convention），所以整棵树都要扫。
+        pool = sorted(
+            os.path.join(root, name)
+            for root, _dirs, names in os.walk(resolved_path)
+            for name in names
+            if os.path.splitext(name)[1].lower() in allowed_extensions
+            and os.path.isfile(os.path.join(root, name))
+        )
+        if not pool:
+            allowed = ", ".join(sorted(allowed_extensions))
+            raise ValueError(
+                f"split screen filler directory has no usable video: {raw_path} "
+                f"(allowed extensions: {allowed})"
+            )
+        chosen = random.choice(pool)
+        logger.info(
+            f"picked split screen filler at random: {os.path.basename(chosen)} "
+            f"(pool size: {len(pool)})"
+        )
+        return chosen
+
+    resolved_path = _resolve_cli_file(
+        raw_path,
+        description="split screen filler",
+        fallback_dir=utils.storage_dir("local_videos"),
+    )
+    extension = os.path.splitext(resolved_path)[1].lower()
+    if extension not in allowed_extensions:
+        allowed = ", ".join(sorted(allowed_extensions))
+        raise ValueError(
+            f"unsupported split screen filler type {extension or '<none>'}; "
+            f"allowed extensions: {allowed}"
+        )
+    return resolved_path
+
+
 def _path_is_within_directory(file_path: str, directory: str) -> bool:
     try:
         return os.path.commonpath(
@@ -643,7 +833,9 @@ def _resolve_managed_resource_file(
     )
 
 
-def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
+def prepare_cli_files(
+    params: VideoParams, stop_at: str, args: argparse.Namespace | None = None
+) -> None:
     """
     在调用 LLM/TTS 前准备 CLI 文件，避免长流程运行到后期才报告路径错误。
 
@@ -661,6 +853,21 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
         ".avi",
         ".flv",
     }
+
+    # 分屏陪看素材必须是视频：静态图片铺满下半屏没有任何观感收益。
+    filler_extensions = {
+        *(f".{extension}" for extension in const.FILE_TYPE_VIDEOS),
+        ".avi",
+        ".flv",
+    }
+
+    if params.split_screen_video:
+        params.split_screen_video = _resolve_split_screen_filler(
+            params.split_screen_video,
+            allowed_extensions=filler_extensions,
+        )
+        if args is not None:
+            _apply_filler_audio_convention(params, args)
 
     if params.custom_audio_file:
         params.custom_audio_file = _resolve_cli_file(
@@ -760,7 +967,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         params = build_video_params(args)
-        prepare_cli_files(params, stop_at=args.stop_at)
+        prepare_cli_files(params, stop_at=args.stop_at, args=args)
     except (ValueError, OSError) as exc:
         logger.error(f"invalid CLI input: {exc}")
         return 2

@@ -1,0 +1,31 @@
+# Tanda de terror liminal / turno noche. Ficción, personajes compuestos.
+#
+# Por qué este tema, y no otro:
+#
+# 1. TRACCIÓN. El terror liminal — lugares familiares pero vacíos — es la
+#    corriente con más interés ahora mismo, empujada por el estreno de
+#    Backrooms en mayo de 2026. Las historias de turno noche vienen creciendo
+#    en el mismo envión.
+#
+# 2. NICHO PROBADO. La narración de historias inquietantes es el formato
+#    faceless con mejor rendimiento sostenido. No necesita cara ni cámara.
+#
+# 3. Y LA RAZÓN OPERATIVA: el material de stock para lugares vacíos es
+#    abundante y de buena calidad. Oficinas de noche, estacionamientos,
+#    escaleras, pasillos con fluorescentes. Es exactamente lo contrario del
+#    problema que tuvimos con fraudes bancarios y rescates en interiores.
+#    El tema con más tracción resulta ser también el más fácil de ilustrar.
+#
+# Cada variación usa un mecanismo de giro distinto: imposibilidad
+# arquitectónica, repetición, un objeto que no cierra, una llamada que no
+# puede existir, y algo que llevaba años quieto y se movió.
+
+a night security guard whose camera feed showed a corridor that does not exist in the building | empty office corridor night fluorescent, security monitor screens dark room, flashlight beam empty hallway, elevator doors closing dim, stairwell concrete empty, reception desk night empty
+
+an office cleaner who realised she had mopped the same floor four times that night | empty open plan office night, mop bucket dim corridor, cubicles dark fluorescent, elevator button panel close up, floor number sign wall, empty lift lobby night
+
+a warehouse night shift where the inventory count came back one higher every single time | warehouse aisle dim lights, barcode scanner close up hands, pallet racking dark, forklift parked empty warehouse, clipboard count sheet, loading dock night door
+
+a hotel night auditor who kept receiving calls from a room number the building does not have | hotel reception desk night, empty hotel corridor carpet, room key card close up, switchboard phone dim, elevator hotel night, room number door plate
+
+a parking attendant and the car that had sat on level four for three years, until the night it moved | parking garage empty night, car alone parking level, security barrier arm night, concrete pillars dim lights, windshield dust close up, exit ramp garage night

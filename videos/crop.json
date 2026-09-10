@@ -1,0 +1,15 @@
+{
+  "_comment": "Pixels trimmed from each edge of a filler BEFORE it is scaled into the bottom panel. Use it to cut watermarks, channel bars, and the blurred pillarbox padding some sources bake in. Keys are exact filenames; 'default' applies to any file without its own entry. Missing edges count as 0.",
+
+  "Try Not To Say WOW Relaxing Oddly Satisfying 1080p.mp4": {
+    "bottom": 70
+  },
+
+  "3 Hour Oddly Satisfying Soap Cutting.mp4": {
+    "bottom": 40
+  },
+
+  "YouTube 8 Hour Soap Cutting Compilation.mp4": {
+    "bottom": 40
+  }
+}

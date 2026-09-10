@@ -87,6 +87,16 @@ class VideoParams(BaseModel):
     match_materials_to_script: bool = False
     video_count: int = Field(default=1, ge=1)
 
+    # 上下分屏“陪看”版式：下半屏播放游戏录屏或解压视频，用于提升短视频完播率。
+    # 可以是单个文件，也可以是目录（每次随机取一条，避免同一素材重复出现）。
+    # 留空则回落到 config.toml 的 split_screen_filler_dir；两者都为空表示关闭。
+    # 素材音轨会被丢弃，只保留正片旁白。
+    split_screen_video: Optional[str] = ""
+    split_screen_ratio: float = Field(default=0.5, gt=0.1, lt=0.95)
+    # 陪看素材音量系数。很多素材是 ASMR，声音本身参与留人，所以默认保留但压低
+    # 到 40%，让旁白始终清晰。设为 0 表示完全静音。
+    split_screen_volume: float = Field(default=0.4, ge=0.0, le=1.0)
+
     video_source: Optional[str] = "pexels"
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
